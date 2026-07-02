@@ -1,26 +1,30 @@
 const express = require('express');
 const cors = require('cors');
 
-const fetch = global.fetch || require('node-fetch');
-
 const app = express();
 
 app.use(cors({ origin: "*" }));
 app.use(express.json());
 
+// 🔑 你的 Claude Key（从 Render 环境变量读）
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 
-// health
+// ===== 健康检查 =====
 app.get('/health', (req, res) => {
-  res.json({ ok: true });
+  res.json({ status: 'ok' });
 });
 
-// chat
+// ===== 聊天接口 =====
 app.post('/chat', async (req, res) => {
   try {
     const message = req.body.message;
 
+    if (!message) {
+      return res.status(400).json({ error: "no message" });
+    }
+
+    // ❗关键：如果key没加载，直接报出来
     if (!ANTHROPIC_API_KEY) {
       return res.status(500).json({
         error: "Missing ANTHROPIC_API_KEY in Render env"
@@ -45,13 +49,14 @@ app.post('/chat', async (req, res) => {
 
     const data = await response.json();
 
-    // ❗关键：把Claude真实错误吐出来
+    // ❗Claude失败直接返回错误
     if (!response.ok) {
       return res.status(500).json({
         error: data
       });
     }
 
+    // 提取回复
     let reply = '';
 
     if (data.content && Array.isArray(data.content)) {
@@ -62,6 +67,8 @@ app.post('/chat', async (req, res) => {
       }
     }
 
+    if (!reply) reply = "（空回复，模型未返回内容）";
+
     res.json({ reply });
 
   } catch (err) {
@@ -71,5 +78,8 @@ app.post('/chat', async (req, res) => {
   }
 });
 
+// ===== 启动 =====
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("running"));
+app.listen(PORT, () => {
+  console.log("Server running on", PORT);
+});
