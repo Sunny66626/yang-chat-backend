@@ -18,7 +18,14 @@ app.get("/health", (req, res) => {
 
 app.post("/chat", async (req, res) => {
   try {
-    const message = req.body && req.body.message ? req.body.message : "";
+    const message = req.body && req.body.message ? String(req.body.message) : "";
+    const model = req.body && req.body.model ? String(req.body.model) : "claude-sonnet-5";
+    const maxTokensRaw = req.body && req.body.max_tokens ? Number(req.body.max_tokens) : 900;
+    const max_tokens = Math.max(
+      200,
+      Math.min(4000, Number.isFinite(maxTokensRaw) ? maxTokensRaw : 900)
+    );
+    const system = req.body && req.body.system ? String(req.body.system) : "";
 
     if (!message) {
       return res.status(400).json({
@@ -32,6 +39,42 @@ app.post("/chat", async (req, res) => {
       });
     }
 
+    let messages = [];
+
+    if (req.body && Array.isArray(req.body.messages)) {
+      messages = req.body.messages
+        .filter(m =>
+          m &&
+          (m.role === "user" || m.role === "assistant") &&
+          typeof m.content === "string" &&
+          m.content.trim()
+        )
+        .slice(-80)
+        .map(m => ({
+          role: m.role,
+          content: m.content
+        }));
+    }
+
+    if (messages.length === 0) {
+      messages = [
+        {
+          role: "user",
+          content: message
+        }
+      ];
+    }
+
+    const body = {
+      model,
+      max_tokens,
+      messages
+    };
+
+    if (system.trim()) {
+      body.system = system.trim();
+    }
+
     const response = await fetch(ANTHROPIC_URL, {
       method: "POST",
       headers: {
@@ -39,21 +82,13 @@ app.post("/chat", async (req, res) => {
         "anthropic-version": "2023-06-01",
         "content-type": "application/json"
       },
-      body: JSON.stringify({
-        model: "claude-sonnet-5",
-        max_tokens: 800,
-        messages: [
-          {
-            role: "user",
-            content: message
-          }
-        ]
-      })
+      body: JSON.stringify(body)
     });
 
     const rawText = await response.text();
 
     let data;
+
     try {
       data = JSON.parse(rawText);
     } catch (e) {
@@ -87,7 +122,9 @@ app.post("/chat", async (req, res) => {
     }
 
     res.json({
-      reply: reply
+      reply,
+      model,
+      usage: data.usage || null
     });
 
   } catch (err) {
