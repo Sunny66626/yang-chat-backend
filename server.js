@@ -1,5 +1,5 @@
-const express = require('express');
-const cors = require('cors');
+const express = require("express");
+const cors = require("cors");
 
 const app = express();
 
@@ -8,6 +8,20 @@ app.use(express.json({ limit: "10mb" }));
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
+
+const MODEL_MAP = {
+  "claude-opus-4-6": "claude-opus-4-6",
+  "claude-opus-4-8": "claude-opus-4-8",
+  "claude-sonnet-5": "claude-sonnet-5",
+  "claude-sonnet-4-6": "claude-sonnet-4-6",
+  "claude-haiku-4-5": "claude-haiku-4-5",
+
+  "Opus 4.6": "claude-opus-4-6",
+  "Opus 4.8": "claude-opus-4-8",
+  "Sonnet 5": "claude-sonnet-5",
+  "Sonnet 4.6": "claude-sonnet-4-6",
+  "Haiku 4.5": "claude-haiku-4-5"
+};
 
 app.get("/health", (req, res) => {
   res.json({
@@ -18,16 +32,39 @@ app.get("/health", (req, res) => {
 
 app.post("/chat", async (req, res) => {
   try {
-    const message = req.body && req.body.message ? String(req.body.message) : "";
-    const model = req.body && req.body.model ? String(req.body.model) : "claude-sonnet-5";
-    const maxTokensRaw = req.body && req.body.max_tokens ? Number(req.body.max_tokens) : 900;
-    const max_tokens = Math.max(
-      200,
-      Math.min(4000, Number.isFinite(maxTokensRaw) ? maxTokensRaw : 900)
-    );
-    const system = req.body && req.body.system ? String(req.body.system) : "";
+    const bodyIn = req.body || {};
 
-    if (!message) {
+    const message = bodyIn.message ? String(bodyIn.message) : "";
+    const requestedModel = bodyIn.model ? String(bodyIn.model) : "claude-opus-4-6";
+    const model = MODEL_MAP[requestedModel] || requestedModel;
+
+    const system = bodyIn.system ? String(bodyIn.system) : "";
+
+    const temperatureRaw = Number(bodyIn.temperature);
+    const temperature = Number.isFinite(temperatureRaw) ? temperatureRaw : 1;
+
+    const maxTokensRaw =
+      bodyIn.max_tokens ||
+      bodyIn.max_reply_tokens ||
+      bodyIn.maxReplyTokens ||
+      4096;
+
+    let max_tokens = Number(maxTokensRaw);
+    if (!Number.isFinite(max_tokens)) max_tokens = 4096;
+    max_tokens = Math.max(500, Math.min(32000, max_tokens));
+
+    const thinkingRaw =
+      bodyIn.thinking_budget ||
+      bodyIn.thinkingBudget ||
+      bodyIn.thinking ||
+      bodyIn.reasoning_budget ||
+      0;
+
+    let thinkingBudget = Number(thinkingRaw);
+    if (!Number.isFinite(thinkingBudget)) thinkingBudget = 0;
+    thinkingBudget = Math.max(0, Math.min(25000, thinkingBudget));
+
+    if (!message && !Array.isArray(bodyIn.messages)) {
       return res.status(400).json({
         error: "没有收到 message"
       });
@@ -41,22 +78,22 @@ app.post("/chat", async (req, res) => {
 
     let messages = [];
 
-    if (req.body && Array.isArray(req.body.messages)) {
-      messages = req.body.messages
+    if (Array.isArray(bodyIn.messages)) {
+      messages = bodyIn.messages
         .filter(m =>
           m &&
           (m.role === "user" || m.role === "assistant") &&
           typeof m.content === "string" &&
           m.content.trim()
         )
-        .slice(-80)
+        .slice(-120)
         .map(m => ({
           role: m.role,
           content: m.content
         }));
     }
 
-    if (messages.length === 0) {
+    if (messages.length === 0 && message) {
       messages = [
         {
           role: "user",
@@ -65,51 +102,102 @@ app.post("/chat", async (req, res) => {
       ];
     }
 
-    const body = {
+    const requestBody = {
       model,
       max_tokens,
       messages
     };
 
     if (system.trim()) {
-      body.system = system.trim();
+      requestBody.system = system.trim();
     }
 
-    const response = await fetch(ANTHROPIC_URL, {
-      method: "POST",
-      headers: {
-        "x-api-key": ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json"
-      },
-      body: JSON.stringify(body)
-    });
+    if (thinkingBudget > 0) {
+      requestBody.thinking = {
+        type: "enabled",
+        budget_tokens: thinkingBudget
+      };
 
-    const rawText = await response.text();
+      if (requestBody.max_tokens <= thinkingBudget) {
+        requestBody.max_tokens = Math.min(32000, thinkingBudget + 1200);
+      }
 
-    let data;
+      requestBody.temperature = 1;
+    } else {
+      requestBody.temperature = temperature;
+    }
 
-    try {
-      data = JSON.parse(rawText);
-    } catch (e) {
-      return res.status(500).json({
-        error: "Claude 返回的不是 JSON",
-        raw: rawText
+    async function callClaude(payload) {
+      const response = await fetch(ANTHROPIC_URL, {
+        method: "POST",
+        headers: {
+          "x-api-key": ANTHROPIC_API_KEY,
+          "anthropic-version": "2023-06-01",
+          "content-type": "application/json"
+        },
+        body: JSON.stringify(payload)
+      });
+
+      const rawText = await response.text();
+
+      let data;
+      try {
+        data = JSON.parse(rawText);
+      } catch (e) {
+        return {
+          ok: false,
+          status: 500,
+          data: {
+            error: "Claude 返回的不是 JSON",
+            raw: rawText
+          }
+        };
+      }
+
+      return {
+        ok: response.ok,
+        status: response.status,
+        data
+      };
+    }
+
+    let result = await callClaude(requestBody);
+
+    if (!result.ok && thinkingBudget > 0) {
+      const retryBody = { ...requestBody };
+      delete retryBody.thinking;
+      retryBody.temperature = temperature;
+
+      result = await callClaude(retryBody);
+
+      if (result.ok) {
+        result.data._thinking_fallback = true;
+      }
+    }
+
+    if (!result.ok) {
+      return res.status(result.status || 500).json({
+        error: result.data
       });
     }
 
-    if (!response.ok) {
-      return res.status(response.status).json({
-        error: data
-      });
-    }
+    const data = result.data;
 
     let reply = "";
+    let thinking = "";
 
     if (data.content && Array.isArray(data.content)) {
       for (const block of data.content) {
         if (block.type === "text" && block.text) {
           reply += block.text;
+        }
+
+        if (block.type === "thinking" && block.thinking) {
+          thinking += block.thinking;
+        }
+
+        if (block.type === "redacted_thinking") {
+          thinking += "[redacted thinking]\n";
         }
       }
     }
@@ -123,8 +211,11 @@ app.post("/chat", async (req, res) => {
 
     res.json({
       reply,
+      thinking: thinking || null,
       model,
-      usage: data.usage || null
+      requested_model: requestedModel,
+      usage: data.usage || null,
+      thinking_fallback: data._thinking_fallback || false
     });
 
   } catch (err) {
