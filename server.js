@@ -9,17 +9,19 @@ app.use(express.json());
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 
-// 健康检查
+// ================= HEALTH =================
 app.get('/health', (req, res) => {
-  res.json({ ok: true });
+  res.json({ status: 'ok' });
 });
 
-// ====== 只保留最核心 chat（去掉数据库）======
+// ================= CHAT =================
 app.post('/chat', async (req, res) => {
   try {
-    console.log("REQ BODY:", req.body);
-
     const { message } = req.body;
+
+    if (!message) {
+      return res.status(400).json({ error: "message is required" });
+    }
 
     const response = await fetch(ANTHROPIC_URL, {
       method: 'POST',
@@ -30,7 +32,7 @@ app.post('/chat', async (req, res) => {
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-5-20250514',
-        max_tokens: 500,
+        max_tokens: 800,
         messages: [
           { role: 'user', content: message }
         ]
@@ -39,23 +41,39 @@ app.post('/chat', async (req, res) => {
 
     const data = await response.json();
 
-    console.log("CLAUDE RAW:", data);
+    // 🔥 关键：如果Claude报错，直接返回给你看
+    if (!response.ok) {
+      return res.status(500).json({
+        error: data
+      });
+    }
 
+    // 🔥 正确解析Claude回复
     let reply = '';
 
-    if (data.content) {
+    if (data.content && Array.isArray(data.content)) {
       for (const block of data.content) {
-        if (block.type === 'text') reply += block.text;
+        if (block.type === 'text') {
+          reply += block.text;
+        }
       }
+    }
+
+    // 🔥 如果还是空，给提示
+    if (!reply) {
+      reply = "（Claude没有返回内容，可能API key或模型有问题）";
     }
 
     res.json({ reply });
 
-  } catch (e) {
-    console.log(e);
-    res.status(500).json({ error: e.message });
+  } catch (err) {
+    res.status(500).json({
+      error: err.message
+    });
   }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("running"));
+app.listen(PORT, () => {
+  console.log("Server running on", PORT);
+});
