@@ -1,6 +1,8 @@
 const express = require('express');
 const cors = require('cors');
 
+const fetch = global.fetch || require('node-fetch');
+
 const app = express();
 
 app.use(cors({ origin: "*" }));
@@ -9,18 +11,20 @@ app.use(express.json());
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 
-// ================= HEALTH =================
+// health
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok' });
+  res.json({ ok: true });
 });
 
-// ================= CHAT =================
+// chat
 app.post('/chat', async (req, res) => {
   try {
-    const { message } = req.body;
+    const message = req.body.message;
 
-    if (!message) {
-      return res.status(400).json({ error: "message is required" });
+    if (!ANTHROPIC_API_KEY) {
+      return res.status(500).json({
+        error: "Missing ANTHROPIC_API_KEY in Render env"
+      });
     }
 
     const response = await fetch(ANTHROPIC_URL, {
@@ -41,14 +45,13 @@ app.post('/chat', async (req, res) => {
 
     const data = await response.json();
 
-    // 🔥 关键：如果Claude报错，直接返回给你看
+    // ❗关键：把Claude真实错误吐出来
     if (!response.ok) {
       return res.status(500).json({
         error: data
       });
     }
 
-    // 🔥 正确解析Claude回复
     let reply = '';
 
     if (data.content && Array.isArray(data.content)) {
@@ -57,11 +60,6 @@ app.post('/chat', async (req, res) => {
           reply += block.text;
         }
       }
-    }
-
-    // 🔥 如果还是空，给提示
-    if (!reply) {
-      reply = "（Claude没有返回内容，可能API key或模型有问题）";
     }
 
     res.json({ reply });
@@ -74,6 +72,4 @@ app.post('/chat', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log("Server running on", PORT);
-});
+app.listen(PORT, () => console.log("running"));
