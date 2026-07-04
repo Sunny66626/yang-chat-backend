@@ -101,6 +101,7 @@ async function callClaude(requestBody) {
     headers: {
       "x-api-key": ANTHROPIC_API_KEY,
       "anthropic-version": "2023-06-01",
+      "anthropic-beta": "prompt-caching-2024-07-31",
       "content-type": "application/json"
     },
     body: JSON.stringify(requestBody)
@@ -205,8 +206,13 @@ app.post("/chat", async (req, res) => {
       messages
     };
 
+    // system prompt 用数组格式 + cache_control，命中缓存省90%输入费
     if (system.trim()) {
-      requestBody.system = system.trim();
+      requestBody.system = [{
+        type: "text",
+        text: system.trim(),
+        cache_control: { type: "ephemeral" }
+      }];
     }
 
     if (thinkingBudget > 0) {
