@@ -4,7 +4,9 @@ const cors = require("cors");
 const app = express();
 
 app.use(cors({ origin: "*" }));
-app.use(express.json({ limit: "10mb" }));
+
+// 图片会用 base64 传到后端；旸的照片很小，但这里放宽一点避免 413。
+app.use(express.json({ limit: "25mb" }));
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
@@ -95,6 +97,114 @@ function cleanMessages(inputMessages, fallbackMessage) {
   return merged.slice(-120);
 }
 
+function stripBase64Prefix(value) {
+  const raw = String(value || "").trim();
+
+  // 支持两种：
+  // 1. 纯 base64
+  // 2. data:image/jpeg;base64,xxxx
+  const match = raw.match(/^data:([^;]+);base64,(.*)$/i);
+
+  if (match) {
+    return {
+      media_type: match[1],
+      data: match[2].replace(/\s/g, "")
+    };
+  }
+
+  return {
+    media_type: null,
+    data: raw.replace(/\s/g, "")
+  };
+}
+
+function normalizeImageMediaType(value) {
+  const mediaType = String(value || "").trim().toLowerCase();
+
+  if (["image/jpeg", "image/png", "image/gif", "image/webp"].includes(mediaType)) {
+    return mediaType;
+  }
+
+  if (mediaType === "image/jpg") {
+    return "image/jpeg";
+  }
+
+  return "image/jpeg";
+}
+
+function getImageFromBody(bodyIn) {
+  const imageRaw =
+    bodyIn.image_base64 ||
+    bodyIn.imageBase64 ||
+    bodyIn.image ||
+    "";
+
+  if (!imageRaw) return null;
+
+  const stripped = stripBase64Prefix(imageRaw);
+
+  if (!stripped.data || stripped.data.length < 20) {
+    return null;
+  }
+
+  const requestedType =
+    bodyIn.image_media_type ||
+    bodyIn.imageMediaType ||
+    stripped.media_type ||
+    "image/jpeg";
+
+  return {
+    media_type: normalizeImageMediaType(requestedType),
+    data: stripped.data
+  };
+}
+
+function attachImageToLastUserMessage(messages, image, messageText) {
+  if (!image) return messages;
+
+  const cloned = messages.map(m => ({ ...m }));
+
+  let lastUserIndex = -1;
+
+  for (let i = cloned.length - 1; i >= 0; i--) {
+    if (cloned[i].role === "user") {
+      lastUserIndex = i;
+      break;
+    }
+  }
+
+  if (lastUserIndex < 0) {
+    cloned.push({
+      role: "user",
+      content: messageText || "请描述这张图片。"
+    });
+    lastUserIndex = cloned.length - 1;
+  }
+
+  const existingText =
+    typeof cloned[lastUserIndex].content === "string"
+      ? cloned[lastUserIndex].content
+      : (messageText || "请描述这张图片。");
+
+  // Claude 视觉输入：图片放在文字前。
+  cloned[lastUserIndex].content = [
+    {
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: image.media_type,
+        data: image.data
+      }
+    },
+    {
+      type: "text",
+      text: existingText || "请描述这张图片。"
+    }
+  ];
+
+  return cloned;
+}
+
 async function callClaude(requestBody) {
   const response = await fetch(ANTHROPIC_URL, {
     method: "POST",
@@ -180,7 +290,9 @@ app.post("/chat", async (req, res) => {
 
     thinkingBudget = Math.max(0, Math.min(25000, thinkingBudget));
 
-    if (!message && !Array.isArray(bodyIn.messages)) {
+    const image = getImageFromBody(bodyIn);
+
+    if (!message && !Array.isArray(bodyIn.messages) && !image) {
       return res.status(400).json({
         error: "没有收到 message"
       });
@@ -192,7 +304,15 @@ app.post("/chat", async (req, res) => {
       });
     }
 
-    const messages = cleanMessages(bodyIn.messages, message);
+    let messages = cleanMessages(bodyIn.messages, message);
+
+    if (image) {
+      messages = attachImageToLastUserMessage(
+        messages,
+        image,
+        message || "请用旸的口吻描述你看到了什么。"
+      );
+    }
 
     if (!messages.length) {
       return res.status(400).json({
@@ -206,13 +326,15 @@ app.post("/chat", async (req, res) => {
       messages
     };
 
-    // system prompt 用数组格式 + cache_control，命中缓存省90%输入费
+    // system prompt 用数组格式 + cache_control，命中缓存省输入费。
     if (system.trim()) {
-      requestBody.system = [{
-        type: "text",
-        text: system.trim(),
-        cache_control: { type: "ephemeral" }
-      }];
+      requestBody.system = [
+        {
+          type: "text",
+          text: system.trim(),
+          cache_control: { type: "ephemeral" }
+        }
+      ];
     }
 
     if (thinkingBudget > 0) {
@@ -289,7 +411,8 @@ app.post("/chat", async (req, res) => {
       model,
       requested_model: requestedModel,
       usage: data.usage || null,
-      thinking_fallback: data._thinking_fallback || false
+      thinking_fallback: data._thinking_fallback || false,
+      vision_used: Boolean(image)
     });
 
   } catch (err) {
